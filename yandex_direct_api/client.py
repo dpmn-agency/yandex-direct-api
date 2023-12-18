@@ -1,120 +1,104 @@
 import requests
-import time
+from requests import request as http_request
+from requests.exceptions import ConnectionError
+from time import sleep
+
+from yandex_direct_api.constants import DateRangeType, ProcessingMode
+from yandex_direct_api.exceptions import YandexDirectApiError, YandexDirectClientError
 
 
 class YandexDirect:
     def __init__(self, app_token: str, sandbox: bool = False):
-        self._app_token = app_token
-        self.sandbox = sandbox
+        self.__app_token = app_token
+        self._api_endpoint = f'https://{"api" if sandbox is False else "api-sandbox"}.direct.yandex.com'
 
-    # Общая функция отправки запросов к API
-    # :service: <str> Название сервиса API в нижнем регистре.
-    # Список сервисов: https://yandex.ru/dev/direct/doc/ref-v5/concepts/about.html
-    # :headers: <dict> Заголовки запроса.
-    # :body: <dict> Тело запроса.
-    # :attempts: <int> Количество попыток получения офлайн-отчёта.
-    def _send_request(self, service: str, headers: dict, body: dict, attempts: int = 5):
-        if self.sandbox is False:
-            api_endpoint = 'https://api.direct.yandex.com'
-        else:
-            api_endpoint = 'https://api-sandbox.direct.yandex.com'
-
-        api_url = '/'.join([api_endpoint, 'json', 'v5', service])
+    def _make_request(self, service: str, headers: dict, body: dict) -> requests.Response:
+        """
+        Общая функция отправки запросов к API.
+        :param service: Название сервиса API в нижнем регистре. Список сервисов: https://yandex.ru/dev/direct/doc/ref-v5/concepts/about.html
+        :param headers: Заголовки запроса.
+        :param body: Тело запроса.
+        :return:
+        """
+        api_url = '/'.join([self._api_endpoint, 'json', 'v5', service])
         headers.update({
-            'Authorization': f'Bearer {self._app_token}'
+            'Authorization': f'Bearer {self.__app_token}'
         })
 
-        response = requests.request('POST', url=api_url, headers=headers, json=body)
-        response.encoding = 'utf-8'
+        while True:
+            try:
+                response = http_request('POST', url=api_url, headers=headers, json=body)
+                # Принудительная обработка ответа в кодировке UTF-8
+                response.encoding = 'utf-8'
 
-        if response.status_code in (201, 202):
-            if attempts > 0:
-                retry_in = int(response.headers.get('retryIn', 60))
-                attempts -= 1
-                time.sleep(retry_in)
+                if response.status_code == 200:
+                    return response
+                elif response.status_code in (201, 202):
+                    retry_in = int(response.headers.get('retryIn', 60))
+                    sleep(retry_in)
+                else:
+                    raise YandexDirectApiError(response.text)
+            except ConnectionError:
+                raise YandexDirectClientError(ConnectionError)
 
-                return self._send_request(service, headers, body, attempts)
-
-        return response
-
-    # Метод для получения статистики по аккаунту
-    # Спецификация отчёта: https://yandex.ru/dev/direct/doc/reports/spec.html
-    # Описание заголовков запроса: https://yandex.ru/dev/direct/doc/reports/headers.html
-    def reports(self,
-                report_name: str,
-                report_type: str,
-                report_fields: list,
-                date_range_type: str = 'YESTERDAY',
-                date_from: str = None,
-                date_to: str = None,
-                data_filter: list = None,
-                goals: list = None,
-                attribution_models: list = None,
-                page_limit: int = 1000000,
-                order_by: list = None,
-                include_vat: bool = False,
-                client_login: str = None,
-                processing_mode: str = 'auto',
-                return_money_in_micros: bool = True,
-                skip_report_header: bool = True,
-                skip_column_header: bool = True,
-                skip_report_summary: bool = True):
+    def get_report(self, report_name: str, report_type: str, field_names: list, mode='json', **kwargs):
+        """
+        Формирование отчёта из Yandex.Direct.
+        :param report_name: Произвольное уникальное название отчёта.
+        :param report_type: Тип отчёта https://yandex.ru/dev/direct/doc/reports/type.html.
+        :param field_names: Имена полей (столбцов), которые будут присутствовать в отчёте.
+        :param mode: Формат отчёта. Можно указать значения 'tsv' или 'json'.
+        :param kwargs: Другие параметры (https://yandex.ru/dev/direct/doc/reports/spec.html) отчёта и заголовки (https://yandex.ru/dev/direct/doc/reports/headers.html).
+        :return: Содержание отчёта https://yandex.ru/dev/direct/doc/reports/report-format.html.
+        """
+        # Параметры заголовков запроса
+        skip_report_header = kwargs.get('skip_report_header', True)
+        skip_column_header = kwargs.get('skip_column_header', True)
+        skip_report_summary = kwargs.get('skip_report_summary', True)
 
         headers = {
-            'Client-Login': client_login,
-            'processingMode': processing_mode,
-            'returnMoneyInMicros': str(return_money_in_micros).lower(),
+            'Client-Login': kwargs.get('client_login', None),
+            'processingMode': kwargs.get('processing_mode', ProcessingMode.AUTO),
+            'returnMoneyInMicros': str(kwargs.get('return_money_in_micros', False)).lower(),
             'skipReportHeader': str(skip_report_header).lower(),
             'skipColumnHeader': str(skip_column_header).lower(),
             'skipReportSummary': str(skip_report_summary).lower()
         }
 
-        if data_filter is None:
-            data_filter = []
-
-        if goals is None:
-            goals = []
-
-        if attribution_models is None:
-            attribution_models = []
-
-        if order_by is None:
-            order_by = []
-
         body = {
             'params': {
                 'SelectionCriteria': {
-                    'DateFrom': '',
-                    'DateTo': '',
-                    'Filter': data_filter
+                    'Filter': kwargs.get('filter', [])
                 },
-                'Goals': goals,
-                'AttributionModels': attribution_models,
-                'FieldNames': report_fields,
+                'Goals': kwargs.get('goals', []),
+                'AttributionModels': kwargs.get('attribution_models', []),
+                'FieldNames': field_names,
                 'Page': {
-                    'Limit': page_limit
+                    'Limit': kwargs.get('page_limit', 1_000_000),
+                    'Offset': kwargs.get('page_offset', 0)
                 },
-                'OrderBy': order_by,
+                'OrderBy': kwargs.get('order_by', []),
                 'ReportName': report_name,
                 'ReportType': report_type,
-                'DateRangeType': date_range_type,
+                'DateRangeType': kwargs.get('date_range_type', DateRangeType.AUTO),
                 'Format': 'TSV',
-                'IncludeVAT': 'NO' if include_vat is False else 'YES'
+                'IncludeVAT': 'NO' if kwargs.get('include_vat', False) is False else 'YES'
             }
         }
 
         # Параметры DateFrom и DateTo обязательны при значении CUSTOM_DATE параметра DateRangeType и недопустимы
         # при других значениях.
-        if date_from and date_to:
-            body['params']['SelectionCriteria']['DateFrom'] = date_from
-            body['params']['SelectionCriteria']['DateTo'] = date_to
-        else:
-            body['params']['SelectionCriteria'].pop('DateFrom')
-            body['params']['SelectionCriteria'].pop('DateTo')
+        if body['params']['DateRangeType'] == DateRangeType.CUSTOM_DATE:
+            try:
+                body['params']['SelectionCriteria']['DateFrom'] = kwargs['date_from']
+                body['params']['SelectionCriteria']['DateTo'] = kwargs['date_to']
+            except KeyError:
+                YandexDirectClientError(KeyError)
 
-        response = self._send_request('reports', headers, body)
+        response = self._make_request('reports', headers, body)
 
-        if response.status_code == 200:
+        if mode.lower() == 'json':
+            # Преобразование отчёта к JSON формату
             data_rows = response.text.strip().split('\n')
             data_headers = []
 
@@ -135,71 +119,119 @@ class YandexDirect:
                 data = [row.split('\t') for row in data_rows]
 
             return data
+        elif mode.lower() == 'tsv':
+            return response.text
         else:
-            print(response.json())
-            return response.json()
+            raise YandexDirectClientError(f"""
+                '{mode}' не является допустимым значением параметра mode. Разрешённые значения: json, tsv.
+            """)
 
-    # Возвращает список рекламодателей — клиентов агентства, их параметры и настройки главных
-    # представителей рекламодателя.
-    # Документация метода: https://yandex.ru/dev/direct/doc/ref-v5/agencyclients/get.html
-    def agency_clients(self,
-                       field_names: list,
-                       logins: list = None,
-                       archived: bool = False,
-                       limit: int = 10000,
-                       offset: int = 0):
+    def get_campaigns(self, field_names: list, **kwargs):
+        """
+        Возвращает параметры кампаний, отвечающих заданным критериям.
+        :param field_names: Имена параметров, общие для всех типов кампаний, которые требуется получить.
+        :param kwargs: Другие параметры запроса согласно схеме https://yandex.ru/dev/direct/doc/ref-v5/campaigns/get.html.
+        :return: Структура ответа https://yandex.ru/dev/direct/doc/ref-v5/campaigns/get.html#output.
+        """
+        headers = {
+            'Client-Login': kwargs.get('client_login', None)
+        }
+
+        # Параметры тела запроса
+        page_limit = kwargs.get('page_limit', 10000)
+
         body = {
             'method': 'get',
             'params': {
                 'SelectionCriteria': {
-                    'Logins': [] if logins is None else logins,
-                    'Archived': 'NO' if archived is False else 'YES'
+                    'Ids': kwargs.get('ids', []),
+                    'Types': kwargs.get('types', []),
+                    'States': kwargs.get('states', []),
+                    'Statuses': kwargs.get('statuses', []),
+                    'StatusesPayment': kwargs.get('statuses_payment', [])
                 },
                 'FieldNames': field_names,
+                'TextCampaignFieldNames': kwargs.get('text_campaign_field_names', []),
+                'TextCampaignSearchStrategyPlacementTypesFieldNames': kwargs.get('text_campaign_search_strategy_placement_types_field_names', []),
+                'MobileAppCampaignFieldNames': kwargs.get('mobile_app_campaign_field_names', []),
+                'DynamicTextCampaignFieldNames': kwargs.get('dynamic_text_campaign_field_names', []),
+                'CpmBannerCampaignFieldNames': kwargs.get('cpm_banner_campaign_field_names', []),
+                'SmartCampaignFieldNames': kwargs.get('smart_campaign_field_names', []),
+                'UnifiedCampaignFieldNames': kwargs.get('unified_campaign_field_names', []),
+                'UnifiedCampaignSearchStrategyPlacementTypesFieldNames': kwargs.get('unified_campaign_search_strategy_placement_types_field_names', []),
                 'Page': {
-                    'Limit': limit,
-                    'Offset': offset
+                    'Limit': page_limit if page_limit <= 10000 else 10000,
+                    'Offset': kwargs.get('page_offset', 0)
                 }
             }
         }
 
-        response = self._send_request('agencyclients', headers={}, body=body)
-
+        response = self._make_request('campaigns', headers, body)
         return response.json()
 
-    def campaigns(self, client_login: str = None):
+    def get_ads(self, field_names: list, **kwargs) -> dict:
+        """
+        Возвращает параметры объявлений, отвечающих заданным критериям.
+        :param field_names: Имена параметров верхнего уровня, которые требуется получить.
+        :param kwargs: Другие параметры запроса согласно схеме https://yandex.ru/dev/direct/doc/ref-v5/ads/get.html.
+        :return: Структура ответа https://yandex.ru/dev/direct/doc/ref-v5/ads/get.html#output.
+        """
         headers = {
-            'Client-Login': client_login
+            'Client-Login': kwargs.get('client_login', None)
         }
 
-        body = {
-            'method': 'get',
-            'params': {
-                'SelectionCriteria': {},
-                'FieldNames': ['Id', 'Name']
-            }
-        }
+        # Параметры тела запроса
+        mobile = kwargs.get('mobile', None)
+        ids = kwargs.get('ids', [])
+        ad_group_ids = kwargs.get('ad_group_ids', [])
+        campaign_ids = kwargs.get('campaign_ids', [])
+        page_limit = kwargs.get('page_limit', 10000)
 
-        response = self._send_request('campaigns', headers=headers, body=body)
-
-        return response.json()
-
-    def ads(self, campaign_ids: list, client_login: str = None):
-        headers = {
-            'Client-Login': client_login
-        }
+        if any((ids, ad_group_ids, campaign_ids)) is False:
+            raise YandexDirectClientError('Должен быть указан хотя бы один из параметров: Ids, AdGroupIds, CampaignIds.')
 
         body = {
             'method': 'get',
             'params': {
                 'SelectionCriteria': {
-                    'CampaignIds': campaign_ids
+                    'Ids': ids[:10000],
+                    'AdGroupIds': ad_group_ids[:1000],
+                    'CampaignIds': campaign_ids[:10],
+                    'Types': kwargs.get('types', []),
+                    'States': kwargs.get('states', []),
+                    'Statuses': kwargs.get('statuses', []),
+                    'VCardIds': kwargs.get('vcard_ids', [])[:50],
+                    'SitelinkSetIds': kwargs.get('sitelink_set_ids', [])[:50],
+                    'AdImageHashes': kwargs.get('ad_image_hashes', [])[:50],
+                    'VCardModerationStatuses': kwargs.get('vcard_moderation_statuses', []),
+                    'SitelinksModerationStatuses': kwargs.get('sitelinks_moderation_statuses', []),
+                    'AdImageModerationStatuses': kwargs.get('ad_image_moderation_statuses', []),
+                    'AdExtensionIds': kwargs.get('ad_extension_ids', [])[:50]
                 },
-                'FieldNames': ['CampaignId', 'Id'],
-                'TextAdFieldNames': ['Href']
+                'FieldNames': field_names,
+                'TextAdFieldNames': kwargs.get('text_ad_field_names', []),
+                'TextAdPriceExtensionFieldNames': kwargs.get('text_ad_price_extension_field_names', []),
+                'MobileAppAdFieldNames': kwargs.get('mobile_app_ad_field_names', []),
+                'DynamicTextAdFieldNames': kwargs.get('dynamic_text_ad_field_names', []),
+                'TextImageAdFieldNames': kwargs.get('text_image_ad_field_names', []),
+                'MobileAppImageAdFieldNames': kwargs.get('mobile_app_image_ad_field_names', []),
+                'TextAdBuilderAdFieldNames': kwargs.get('text_ad_builder_ad_field_names', []),
+                'MobileAppAdBuilderAdFieldNames': kwargs.get('mobile_app_ad_builder_ad_field_names', []),
+                'MobileAppCpcVideoAdBuilderAdFieldNames': kwargs.get('mobile_app_cpc_video_ad_builder_ad_field_names', []),
+                'CpcVideoAdBuilderAdFieldNames': kwargs.get('cpc_video_ad_builder_ad_field_names', []),
+                'CpmBannerAdBuilderAdFieldNames': kwargs.get('cpm_banner_ad_builder_ad_field_names', []),
+                'CpmVideoAdBuilderAdFieldNames': kwargs.get('cpm_video_ad_builder_ad_field_names', []),
+                'SmartAdBuilderAdFieldNames': kwargs.get('smart_ad_builder_ad_field_names', []),
+                'ShoppingAdFieldNames': kwargs.get('shopping_ad_field_names', []),
+                'Page': {
+                    'Limit': page_limit if page_limit <= 10000 else 10000,
+                    'Offset': kwargs.get('page_offset', 0)
+                }
             }
         }
 
-        response = self._send_request('ads', headers=headers, body=body)
+        if mobile is not None:
+            body['params']['SelectionCriteria']['Mobile'] = mobile
 
+        response = self._make_request('ads', headers, body)
         return response.json()

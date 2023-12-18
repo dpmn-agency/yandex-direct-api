@@ -1,2 +1,2 @@
 # yandex-direct-api
-Python library API Yandex Direct
+Python-библиотека для работы с API Yandex Direct
